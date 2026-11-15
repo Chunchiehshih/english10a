@@ -195,7 +195,7 @@ textarea.input { min-height: 120px; resize: vertical; }
 .tabs button { border: 2px solid var(--line); background: var(--card); border-radius: 999px; padding: 4px 12px; font-size: 14px; }
 .tabs button.on { border-color: var(--accent); color: var(--accent-dark); background: var(--accent-soft); font-weight: 700; }
 select.input { font-size: 16px; padding: 8px 10px; }
-.heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; max-width: 320px; }
 .heat i { aspect-ratio: 1; border-radius: 4px; background: var(--line); }
 .heat i.l1 { background: #BFE5BC; } .heat i.l2 { background: #7FCB7A; } .heat i.l3 { background: var(--accent); }
 details summary { cursor: pointer; font-weight: 700; }

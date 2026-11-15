@@ -94,6 +94,13 @@ registerUnit({
     { en: 'The air is full of delicious smells.', zh: '空氣中充滿美味的香氣。' }
   ],
 
+  // 真人錄音（可省略）：把 mp3 放進 learn/audio/ 資料夾，有錄音的句子會優先播放錄音，其餘用電腦朗讀。
+  //   課文段落：在 article 每段加上 audio: 'audio/u02/p1.mp3'
+  //            或同一個音軌用秒數切段：audio: { src: 'audio/u02/track04.mp3', start: 12.5, end: 31.0 }
+  //   單字：vocab 每個字可加 audio（單字）與 exampleAudio（例句）
+  //   跟讀句：shadowing 每句可加 audio
+  //   其他任何句子：audio: { 'The exact sentence.': 'audio/u02/s1.mp3' }
+
   // 開口說（What Do You Think?）
   discussion: [
     {

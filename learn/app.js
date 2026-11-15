@@ -84,33 +84,84 @@
   }
 
   /* ---------------- 語音：朗讀 TTS ---------------- */
+  // 依聲音品質排序：Edge 自然語音 > Premium > Google > Enhanced > 一般；排除特效聲
+  const NOVELTY = /Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Fred|Junior|Ralph|Kathy|Grandma|Grandpa|Eddy|Flo|Reed|Rocko|Sandy|Shelley|Deranged|Hysterical|Pipe Organ/i;
+  function voiceScore(v) {
+    const n = v.name; let s = 0;
+    if (NOVELTY.test(n)) return -100;
+    if (/Natural/i.test(n)) s += 100;           // Microsoft Edge 神經語音（最自然）
+    if (/Premium/i.test(n)) s += 90;            // macOS 進階語音（需下載）
+    if (/^Google (US|UK) English/i.test(n)) s += 70; // Chrome 線上語音
+    if (/Enhanced/i.test(n)) s += 60;           // macOS 加強語音
+    if (/Online/i.test(n)) s += 20;
+    if (/Ava|Zoe|Evan|Nathan|Samantha|Allison|Susan|Jenny|Aria|Guy|Emma|Andrew|Brian|Michelle/i.test(n)) s += 10;
+    if (/en[-_]US/i.test(v.lang)) s += 8; else if (/en[-_]GB/i.test(v.lang)) s += 5;
+    if (v.localService === false) s += 2;
+    return s;
+  }
+  function voiceTier(v) {
+    const sc = voiceScore(v);
+    return sc >= 100 ? '自然' : sc >= 85 ? '進階' : sc >= 60 ? '良好' : sc < 0 ? '特效' : '一般';
+  }
+  // 真人錄音：單元檔可提供 audio 對照表，有錄音時優先播放錄音
+  const AUDIO = {};
+  function registerAudio(unit) {
+    const add = (text, spec) => { if (text && spec) AUDIO[normText(text)] = spec; };
+    Object.entries(unit.audio || {}).forEach(([t, spec]) => add(t, spec));
+    (unit.article || []).forEach(p => add(p.en, p.audio));
+    vocabPool(unit).forEach(w => { add(w.word, w.audio); add(w.example, w.exampleAudio); });
+    (unit.shadowing || []).forEach(x => add(x.en, x.audio));
+  }
+  let player = null;
   const TTS = {
     ok: 'speechSynthesis' in window,
     voices: [],
     init() {
       if (!this.ok) return;
-      const f = () => { this.voices = speechSynthesis.getVoices().filter(v => /^en[-_]/i.test(v.lang)); };
-      f(); speechSynthesis.onvoiceschanged = f;
+      const f = () => { this.voices = speechSynthesis.getVoices().filter(v => /^en[-_]/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a)); };
+      f(); speechSynthesis.onvoiceschanged = () => { f(); if (tab === 'me' && !L) render(); };
     },
     voice() {
       const want = S.settings.voice;
-      return this.voices.find(v => v.name === want)
-        || this.voices.find(v => /en[-_]US/i.test(v.lang) && /Samantha|Google US|Aria|Jenny|Ava|Allison/i.test(v.name))
-        || this.voices.find(v => /en[-_]US/i.test(v.lang)) || this.voices[0];
+      return this.voices.find(v => v.name === want) || this.voices[0];
+    },
+    best() { return this.voices[0] ? voiceScore(this.voices[0]) : -1; },
+    playRecording(spec, opts) {
+      if (typeof spec === 'string') spec = { src: spec };
+      player = new Audio(spec.src);
+      player.playbackRate = (opts.slow ? 0.75 : 1) * (S.settings.rate || 1);
+      if ('preservesPitch' in player) player.preservesPitch = true;
+      const done = () => { const p = player; player = null; if (p) { p.ontimeupdate = null; p.onended = null; } opts.onend && opts.onend(); };
+      if (spec.start != null) player.currentTime = spec.start;
+      player.ontimeupdate = () => { if (spec.end != null && player && player.currentTime >= spec.end) { player.pause(); done(); } };
+      player.onended = done;
+      player.onerror = () => { player = null; this.speakSynth(opts._text, Object.assign({}, opts, { noRec: true })); };
+      player.play().catch(() => { player = null; this.speakSynth(opts._text, opts); });
     },
     speak(text, opts) {
       opts = opts || {};
+      this.stop();
+      const rec = !S.settings.forceTTS && AUDIO[normText(text)];
+      if (rec) { this.playRecording(rec, Object.assign({}, opts, { _text: text })); return; }
+      this.speakSynth(text, opts);
+    },
+    speakSynth(text, opts) {
       if (!this.ok) { toast('這個瀏覽器不支援朗讀'); return; }
       speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'en-US'; const v = this.voice(); if (v) u.voice = v;
-      u.rate = (opts.slow ? 0.65 : 1) * (S.settings.rate || 1);
-      if (opts.onboundary) u.onboundary = opts.onboundary;
-      u.onend = () => opts.onend && opts.onend();
-      u.onerror = () => opts.onend && opts.onend();
-      speechSynthesis.speak(u);
+      // 逐句朗讀：避免 Chrome 長句中斷，也讓停頓更自然
+      const parts = sentences(text).map(x => x.trim()).filter(Boolean);
+      let from = 0; const v = this.voice();
+      parts.forEach((part, k) => {
+        const off = Math.max(0, text.indexOf(part, from)); from = off + part.length;
+        const u = new SpeechSynthesisUtterance(part);
+        u.lang = v ? v.lang : 'en-US'; if (v) u.voice = v;
+        u.rate = (opts.slow ? 0.7 : 1) * (S.settings.rate || 1);
+        if (opts.onboundary) u.onboundary = e => opts.onboundary({ name: e.name, charIndex: e.charIndex + off });
+        if (k === parts.length - 1) { u.onend = () => opts.onend && opts.onend(); u.onerror = () => opts.onend && opts.onend(); }
+        speechSynthesis.speak(u);
+      });
     },
-    stop() { if (this.ok) speechSynthesis.cancel(); }
+    stop() { if (player) { player.pause(); player = null; } if (this.ok) speechSynthesis.cancel(); }
   };
   TTS.init();
 
@@ -425,13 +476,24 @@
   }
   function readerHtml() {
     const u = currentUnit();
-    return `${unitTabs()}<h2 class="en">${esc(u.title)}</h2><div class="muted">${esc(u.titleZh || '')} ${u.author ? '· ' + esc(u.author) : ''}</div>
+    return `${voiceHint(false)}${unitTabs()}<h2 class="en">${esc(u.title)}</h2><div class="muted">${esc(u.titleZh || '')} ${u.author ? '· ' + esc(u.author) : ''}</div>
       ${u.intro ? `<div class="note">${esc(u.intro)}</div>` : ''}
       <div class="row small muted"><span><span class="para"><span class="v" style="font-size:15px">綠色</span></span>＝本課單字</span><span><span style="color:var(--blue)">藍色</span>＝文法重點</span><span>點任何字可聽發音</span></div>
       <div class="row" style="margin-top:10px"><button class="btn small" id="play-all">▶ 朗讀全文</button><button class="btn small ghost" id="stop-all">■ 停止</button></div>
       ${(u.article || []).map((p, i) => paraBlock(u, p, i, S.settings.showZh)).join('')}
       ${(u.infoBox || []).length ? `<div class="card"><details><summary>Info Box 補充說明</summary>${u.infoBox.map(x => `<p><b>${esc(x.ref)}</b>　${esc(x.zh)}</p>`).join('')}</details></div>` : ''}
       ${(u.grammar || []).length ? `<div class="card"><details><summary>Language Notes 文法重點</summary>${u.grammar.map(g => grammarNoteHtml(g)).join('<hr style="border:0;border-top:1px solid var(--line)">')}</details></div>` : ''}`;
+  }
+  function voiceHint(always) {
+    if (!TTS.ok || (!always && (TTS.best() >= 85 || S.settings.hideVoiceHint))) return '';
+    if (TTS.best() >= 85) return '';
+    const isEdge = /Edg\//.test(navigator.userAgent);
+    return `<div class="card" style="border-color:var(--gold);background:var(--gold-soft)"><b>想要更自然的朗讀聲音？</b>
+      <ol class="small" style="margin:6px 0;padding-left:20px">
+        ${isEdge ? '' : '<li><b>最推薦：</b>改用 <b>Microsoft Edge</b> 瀏覽器開啟這個 App，它內建免費的「Natural 自然語音」（例如 Ava、Andrew、Emma），聽起來接近真人。開啟後到「我的 → 朗讀聲音」選標示【自然】的聲音。</li>'}
+        <li>Mac：系統設定 → 輔助使用 → 朗讀內容 → 系統聲音 → 管理聲音 → 英文（美國）→ 下載 <b>Ava（進階 / Premium）</b> 或 Zoe（進階），下載後重新開啟瀏覽器（Safari 最容易抓到這些聲音）。</li>
+        <li>有雜誌附的官方音檔（MP3）的話，傳給我，我可以把真人錄音接進課文與單字。</li>
+      </ol>${always ? '' : '<button class="btn small ghost" id="hide-vhint">知道了，不再顯示</button>'}</div>`;
   }
   function grammarNoteHtml(g) {
     return `<h3>${esc(g.title)}</h3>${g.formula ? `<div class="note en"><b>${esc(g.formula)}</b></div>` : ''}<div>${g.explain || ''}</div>
@@ -471,14 +533,17 @@
     const totalLessons = UNITS.reduce((s, u) => s + unitProgress(u).total, 0);
     const doneLessons = UNITS.reduce((s, u) => s + unitProgress(u).done, 0);
     const learned = Object.values(S.srs).filter(r => r.box >= 4).length;
-    const voices = TTS.voices.map(v => `<option value="${esc(v.name)}" ${S.settings.voice === v.name ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('');
-    return `<h2>我的學習歷程</h2>
+    const voices = TTS.voices.filter(v => voiceScore(v) >= 0).map(v => `<option value="${esc(v.name)}" ${S.settings.voice === v.name ? 'selected' : ''}>【${voiceTier(v)}】${esc(v.name)} (${esc(v.lang)})</option>`).join('');
+    const cur = TTS.voice();
+    return `<h2>我的學習歷程</h2>${voiceHint(true)}
       <div class="end-stats"><div class="s"><b>🔥 ${S.streak.count}</b>連續天數</div><div class="s"><b>⚡ ${S.xp}</b>總 XP</div><div class="s"><b>${doneLessons}/${totalLessons}</b>完成課數</div></div>
       <div class="card"><h3>最近 4 週</h3>${heatmap()}<p class="small muted">最長連續：${S.streak.best || S.streak.count} 天 · 熟練單字：${learned} 個</p></div>
       <div class="card"><h3>設定</h3>
         <div class="list-item"><div class="grow">每日目標</div><select class="input" id="set-goal" style="width:auto">${[10, 20, 30, 50, 80].map(g => `<option ${S.goal === g ? 'selected' : ''} value="${g}">${g} XP</option>`).join('')}</select></div>
         <div class="list-item"><div class="grow">朗讀速度</div><select class="input" id="set-rate" style="width:auto">${[0.8, 0.9, 1, 1.1].map(r => `<option ${S.settings.rate === r ? 'selected' : ''} value="${r}">${r}×</option>`).join('')}</select></div>
-        <div class="list-item"><div class="grow">朗讀聲音</div><select class="input" id="set-voice" style="max-width:60%"><option value="">自動</option>${voices}</select><button class="icon-btn" data-say="Hello! Let's learn English together.">▶</button></div>
+        <div class="list-item"><div class="grow">朗讀聲音</div><select class="input" id="set-voice" style="max-width:60%"><option value="">自動</option>${voices}</select><button class="icon-btn" data-say="As the years passed, something strange became clear. Benjamin was not aging. He was growing younger.">▶</button></div>
+        <div class="small muted" style="padding:4px 0 8px">目前使用：${cur ? esc(cur.name) + '（' + voiceTier(cur) + '）' : '無'}</div>
+        ${Object.keys(AUDIO).length ? `<div class="list-item"><div class="grow">有真人錄音時優先播放錄音</div><input type="checkbox" id="set-rec" ${S.settings.forceTTS ? '' : 'checked'}></div>` : ''}
         <div class="list-item"><div class="grow">課文預設顯示中文翻譯</div><input type="checkbox" id="set-zh" ${S.settings.showZh ? 'checked' : ''}></div>
         <div class="list-item"><div class="grow">解鎖全部關卡（老師／預習用）</div><input type="checkbox" id="set-unlock" ${S.settings.unlockAll ? 'checked' : ''}></div>
         <div class="list-item"><div class="grow">外觀</div><select class="input" id="set-theme" style="width:auto"><option value="">跟隨系統</option><option value="light" ${S.settings.theme === 'light' ? 'selected' : ''}>淺色</option><option value="dark" ${S.settings.theme === 'dark' ? 'selected' : ''}>深色</option></select></div>
@@ -515,6 +580,8 @@
     on('set-goal', 'change', e => { S.goal = +e.target.value; save(); });
     on('set-rate', 'change', e => { S.settings.rate = +e.target.value; save(); });
     on('set-voice', 'change', e => { S.settings.voice = e.target.value; save(); TTS.speak('This is my voice.'); });
+    on('set-rec', 'change', e => { S.settings.forceTTS = !e.target.checked; save(); });
+    on('hide-vhint', 'click', () => { S.settings.hideVoiceHint = true; save(); render(); });
     on('set-zh', 'change', e => { S.settings.showZh = e.target.checked; save(); });
     on('set-unlock', 'change', e => { S.settings.unlockAll = e.target.checked; save(); });
     on('set-theme', 'change', e => { S.settings.theme = e.target.value; save(); applyTheme(); });
@@ -930,6 +997,7 @@
     try { await loadScript('units/manifest.js'); } catch (e) { try { await loadScript('units/manifest.example.js'); } catch (e2) { /* 無單元 */ } }
     for (const f of (window.UNIT_FILES || [])) { try { await loadScript('units/' + f); } catch (e) { failedFiles.push(f); } }
     UNITS.sort((a, b) => (a.order || 0) - (b.order || 0));
+    UNITS.forEach(registerAudio);
     render();
   }
   window.__app = { get state() { return S; }, get lesson() { return L; }, units: UNITS, buildLessons };

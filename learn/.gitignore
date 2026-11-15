@@ -1,0 +1,4 @@
+# 雜誌內容只留在本機，不上傳到公開的 GitHub
+units/*
+!units/_template.js
+!units/manifest.example.js

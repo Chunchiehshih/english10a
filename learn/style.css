@@ -205,3 +205,9 @@ details summary { cursor: pointer; font-weight: 700; }
   .para { font-size: 18px; }
   .end-stats b { font-size: 18px; }
 }
+
+.dl { margin: 6px 0; }
+.dl .sp { color: var(--blue); font-weight: 800; }
+.passage { font-size: 16px; line-height: 1.7; max-height: 46vh; overflow: auto; margin-bottom: 14px; white-space: pre-line; }
+.unit-pick { margin: 16px 0 4px; }
+.unit-pick select { margin-top: 4px; }

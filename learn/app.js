@@ -34,7 +34,8 @@
     const raw = localStorage.getItem(KEY);
     if (raw) { const d = JSON.parse(raw); S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings || {}); S.streak = Object.assign(defaults().streak, d.streak || {}); }
   } catch (e) { /* 無法讀取時用預設值 */ }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('無法儲存進度（瀏覽器封鎖了本機儲存）'); } }
+  let saveWarned = false;
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { if (!saveWarned) { saveWarned = true; toast('無法儲存進度（瀏覽器封鎖了本機儲存）'); } } }
   function applyTheme() { if (S.settings.theme) document.documentElement.setAttribute('data-theme', S.settings.theme); else document.documentElement.removeAttribute('data-theme'); }
   applyTheme();
 
@@ -161,6 +162,30 @@
         speechSynthesis.speak(u);
       });
     },
+    // 對話：不同說話者用不同聲音
+    speakLines(lines, opts) {
+      opts = opts || {};
+      this.stop();
+      if (!this.ok) { toast('這個瀏覽器不支援朗讀'); return; }
+      const pool = this.voices.filter(v => voiceScore(v) >= 0 && /en[-_](US|GB|AU|CA)/i.test(v.lang));
+      const FEM = /Samantha|Ava|Zoe|Allison|Susan|Jenny|Aria|Emma|Michelle|Karen|Moira|Tessa|Serena|Victoria|Kate|Female|Libby|Sonia|Natasha|Google US English|Google UK English Female/i;
+      const MAL = /Alex|Daniel|Tom|Evan|Nathan|Guy|Andrew|Brian|Christopher|Eric|Aaron|Arthur|Oliver|Ryan|Thomas|Male|Davis|Roger/i;
+      const chosen = this.voice();
+      const fem = pool.find(v => FEM.test(v.name) && !MAL.test(v.name)) || chosen;
+      const mal = pool.find(v => MAL.test(v.name)) || pool.find(v => v !== fem) || chosen;
+      const speakers = []; lines.forEach(l => { if (!speakers.includes(l.sp)) speakers.push(l.sp); });
+      const voiceFor = l => { const g = l.g || (speakers.indexOf(l.sp) % 2 === 0 ? 'f' : 'm'); return g === 'm' ? mal : fem; };
+      speechSynthesis.cancel();
+      lines.forEach((l, k) => {
+        sentences(l.en).map(x => x.trim()).filter(Boolean).forEach((part, j, arr) => {
+          const u = new SpeechSynthesisUtterance(part); const v = voiceFor(l);
+          if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-US';
+          u.rate = (opts.slow ? 0.7 : 1) * (S.settings.rate || 1);
+          if (k === lines.length - 1 && j === arr.length - 1) { u.onend = () => opts.onend && opts.onend(); u.onerror = u.onend; }
+          speechSynthesis.speak(u);
+        });
+      });
+    },
     stop() { if (player) { player.pause(); player = null; } if (this.ok) speechSynthesis.cancel(); }
   };
   TTS.init();
@@ -235,9 +260,22 @@
     if (d.type === 'fill') return { t: 'type', label: d.label || '填空', prompt: d.q, answers: d.answers, hint: d.hint || '', zh: d.zh || '', explain: d.explain || '', audioAfter: d.full || null };
     if (d.type === 'order') return Object.assign(orderFrom(d.en, d.zh, d.extra), { explain: d.explain || '' });
     if (d.type === 'speak') return { t: 'speak', text: d.en, zh: d.zh || '' };
+    if (d.type === 'translate') return { t: 'type', translate: true, label: d.label || '中翻英：把句子翻成英文', prompt: d.zh || d.q, answers: [d.en].concat(d.alts || []), hint: d.hint || '', explain: d.note || '', audioAfter: d.en };
     return null;
   }
   function wrongOnce(items) { return items.filter(Boolean); }
+  function readingItem(r, unit) {
+    if (r.type === 'fill') return { t: 'type', label: r.label || '依文意填空', prompt: r.q, passage: r.passage || '', answers: r.answers, hint: r.hint || '', explain: r.explain || '' };
+    if (r.type === 'translate') return drillToItem(r);
+    const tf = r.type === 'tf';
+    const listen = !!(r.audio || r.audioLines);
+    return {
+      t: 'mc', label: r.label || (listen ? '聽力測驗：先聽再作答' : tf ? '是非題：依文章判斷對錯' : (unit.readingLabel || '閱讀理解')),
+      prompt: r.q, passage: r.passage || '', options: tf ? ['True（正確）', 'False（錯誤）'] : r.options, answer: tf ? (r.answer ? 0 : 1) : r.answer,
+      explain: r.explain || '', showArticle: !listen && !r.passage && (unit.article || []).length > 0, shuffle: false,
+      listenLines: r.audioLines || (r.audio ? [{ sp: '', en: r.audio }] : null), script: listen
+    };
+  }
 
   function buildLessons(unit) {
     const L = [];
@@ -275,12 +313,12 @@
     }
     // 2) 課文：分兩段聽讀
     const paras = unit.article || [];
-    const parts = paras.length > 3 ? [paras.slice(0, Math.ceil(paras.length / 2)), paras.slice(Math.ceil(paras.length / 2))] : [paras];
+    const parts = !paras.length ? [] : paras.length > 6 ? chunk(paras, 3) : paras.length > 3 ? [paras.slice(0, Math.ceil(paras.length / 2)), paras.slice(Math.ceil(paras.length / 2))] : [paras];
     let offset = 0;
     parts.forEach((ps, pi) => {
       const start = offset; offset += ps.length;
       L.push({
-        id: 'story-' + (pi + 1), icon: '🎧', title: parts.length > 1 ? `課文聽讀 ${pi === 0 ? '上' : '下'}` : '課文聽讀', sub: `第 ${start + 1}–${start + ps.length} 段`,
+        id: 'story-' + (pi + 1), icon: '🎧', title: parts.length > 2 ? `課文聽讀 ${pi + 1}` : parts.length > 1 ? `課文聽讀 ${pi === 0 ? '上' : '下'}` : '課文聽讀', sub: ps.every(p => p.heading) ? ps.map(p => p.heading).join(' · ') : `第 ${start + 1}–${start + ps.length} 段`,
         build() {
           const a = [];
           ps.forEach((p, k) => {
@@ -325,9 +363,16 @@
     }
     // 5) 閱讀測驗
     if ((unit.reading || []).length) {
-      L.push({
-        id: 'reading', icon: '📖', title: '閱讀測驗', sub: `${unit.reading.length} 題`,
-        build() { return unit.reading.map(r => ({ t: 'mc', label: '閱讀理解（可按「看課文」）', prompt: r.q, options: r.options, answer: r.answer, explain: r.explain || '', showArticle: true, shuffle: false })); }
+      // 可用 section 分組（例如 GEPT 的詞彙、段落填空、閱讀理解），否則每 8 題一課
+      const groups = [];
+      unit.reading.forEach(r => { const key = r.section || ''; let g = groups[groups.length - 1]; if (!g || g.key !== key || (!key && g.items.length >= 8)) { g = { key, items: [] }; groups.push(g); } g.items.push(r); });
+      groups.forEach((g, gi) => {
+        const isListen = g.items.every(r => r.audio || r.audioLines);
+        L.push({
+          id: 'reading' + (gi ? '-' + (gi + 1) : ''), icon: isListen ? '🎧' : '📖',
+          title: g.key || (unit.readingTitle || '閱讀測驗') + (groups.length > 1 ? ' ' + (gi + 1) : ''), sub: `${g.items.length} 題`,
+          build() { return g.items.map(r => readingItem(r, unit)); }
+        });
       });
     }
     // 6) 開口說：自由回答
@@ -408,6 +453,9 @@
   function unitTabs() {
     if (UNITS.length < 2) return '';
     const u = currentUnit();
+    if (UNITS.length > 4) {
+      return `<div class="unit-pick"><label class="small muted" for="unit-select">選擇單元</label><select class="input" id="unit-select">${UNITS.map(x => { const pr = unitProgress(x); return `<option value="${esc(x.id)}" ${x.id === u.id ? 'selected' : ''}>${esc(x.short || x.title)}${pr.done ? `（${pr.done}/${pr.total}）` : ''}</option>`; }).join('')}</select></div>`;
+    }
     return `<div class="tabs">${UNITS.map(x => `<button data-unit="${esc(x.id)}" class="${x.id === u.id ? 'on' : ''}">${esc(x.short || x.title)}</button>`).join('')}</div>`;
   }
   function unitProgress(u) {
@@ -447,7 +495,7 @@
         <div class="tag">${esc(u.series || '')}${u.series ? ' · ' : ''}完成 ${pr.done}/${pr.total} 課</div>
         <div class="title en">${esc(u.title)}</div>
         <div class="zh">${esc(u.titleZh || '')}</div>
-        <button id="go-read">📰 先看課文</button>
+        ${(u.article || []).length ? '<button id="go-read">📰 先看課文</button>' : ''}
       </div>
       <div class="path">${nodes}</div>`;
   }
@@ -468,16 +516,22 @@
     }
     return out.join('');
   }
+  function paraInner(unit, p, idx) {
+    if (p.lines) return `<div class="para en" id="para-${idx}">${p.scene ? `<div class="small muted"><i>${esc(p.scene)}</i></div>` : ''}${p.lines.map(l => `<div class="dl"><b class="sp">${esc(l.sp)}:</b> ${tokenizeHtml(l.en, unit, idx)}</div>`).join('')}</div>`;
+    return `<div class="para en" id="para-${idx}">${tokenizeHtml(p.en, unit, idx)}</div>`;
+  }
+  function paraLabel(p, idx) { return p.heading ? esc(p.heading) : `第 ${idx + 1} 段`; }
   function paraBlock(unit, p, idx, showZh) {
-    return `<div class="card"><div class="row" style="margin-bottom:8px"><span class="muted small" style="flex:1">第 ${idx + 1} 段</span>
+    return `<div class="card"><div class="row" style="margin-bottom:8px"><span class="muted small" style="flex:1">${paraLabel(p, idx)}</span>
       <button class="icon-btn" data-play="${idx}" title="朗讀">▶</button><button class="icon-btn slow" data-play-slow="${idx}" title="慢速朗讀">🐢</button></div>
-      <div class="para en" id="para-${idx}">${tokenizeHtml(p.en, unit, idx)}</div>
+      ${paraInner(unit, p, idx)}
       ${p.zh ? `<details class="zh-trans" ${showZh ? 'open' : ''}><summary>中文參考翻譯</summary>${esc(p.zh)}</details>` : ''}</div>`;
   }
   function readerHtml() {
     const u = currentUnit();
     return `${voiceHint(false)}${unitTabs()}<h2 class="en">${esc(u.title)}</h2><div class="muted">${esc(u.titleZh || '')} ${u.author ? '· ' + esc(u.author) : ''}</div>
       ${u.intro ? `<div class="note">${esc(u.intro)}</div>` : ''}
+      ${(u.article || []).length ? '' : '<div class="card muted">這個單元沒有課文，請直接到「學習」頁做練習。</div>'}
       <div class="row small muted"><span><span class="para"><span class="v" style="font-size:15px">綠色</span></span>＝本課單字</span><span><span style="color:var(--blue)">藍色</span>＝文法重點</span><span>點任何字可聽發音</span></div>
       <div class="row" style="margin-top:10px"><button class="btn small" id="play-all">▶ 朗讀全文</button><button class="btn small ghost" id="stop-all">■ 停止</button></div>
       ${(u.article || []).map((p, i) => paraBlock(u, p, i, S.settings.showZh)).join('')}
@@ -556,6 +610,7 @@
 
   function bindPage() {
     $$('[data-unit]').forEach(b => b.onclick = () => { S.settings.unit = b.dataset.unit; save(); render(); });
+    const us = $('#unit-select'); if (us) us.onchange = () => { S.settings.unit = us.value; save(); render(); };
     $$('[data-say]').forEach(b => b.onclick = () => TTS.speak(b.dataset.say));
     const u = currentUnit();
     $$('[data-lesson]').forEach(b => b.onclick = () => {
@@ -599,6 +654,7 @@
   }
   function playPara(u, idx, slow, onDone) {
     const p = u.article[idx]; const el = $('#para-' + idx);
+    if (p.lines && !AUDIO[normText(p.en)]) { TTS.speakLines(p.lines, { slow, onend: onDone }); return; }
     $$('.speaking').forEach(x => x.classList.remove('speaking'));
     const spans = el ? $$('.w', el) : [];
     TTS.speak(p.en, {
@@ -774,7 +830,7 @@
     const u = L.unit;
     const d = document.createElement('div');
     d.style.cssText = 'position:fixed;inset:0;background:var(--bg);z-index:30;overflow:auto;padding:16px';
-    d.innerHTML = `<div style="max-width:720px;margin:0 auto"><button class="btn small ghost" id="close-art">✕ 關閉課文</button><h2 class="en">${esc(u.title)}</h2>${(u.article || []).map((p, i) => `<p class="para en" style="font-size:17px"><span class="muted small">${i + 1}　</span>${esc(p.en)}</p>`).join('')}</div>`;
+    d.innerHTML = `<div style="max-width:720px;margin:0 auto"><button class="btn small ghost" id="close-art">✕ 關閉課文</button><h2 class="en">${esc(u.title)}</h2>${(u.article || []).map((p, i) => p.lines ? `<div class="para en" style="font-size:17px">${p.heading ? `<b>${esc(p.heading)}</b>` : ''}${p.lines.map(l => `<div><b>${esc(l.sp)}:</b> ${esc(l.en)}</div>`).join('')}</div>` : `<p class="para en" style="font-size:17px"><span class="muted small">${p.heading ? esc(p.heading) + ' · ' : ''}${i + 1}　</span>${esc(p.en)}</p>`).join('')}</div>`;
     document.body.appendChild(d); $('#close-art').onclick = () => d.remove();
   }
   const RENDER = {
@@ -787,8 +843,8 @@
       bind: () => { $$('[data-say]').forEach(b => b.onclick = () => TTS.speak(b.dataset.say)); }
     },
     read: {
-      html: it => `<div class="q-type">聽讀課文 · 第 ${it.idx + 1} 段</div><div class="row" style="margin-bottom:10px">${audioButtons(it.para.en)}<span class="muted small">先聽一次，再自己讀一次。點單字可聽發音。</span></div>
-        <div class="card"><div class="para en" id="para-${it.idx}">${tokenizeHtml(it.para.en, L.unit, it.idx)}</div>
+      html: it => `<div class="q-type">聽讀課文 · ${paraLabel(it.para, it.idx)}</div><div class="row" style="margin-bottom:10px">${audioButtons(it.para.en)}<span class="muted small">先聽一次，再自己讀一次。點單字可聽發音。</span></div>
+        <div class="card">${paraInner(L.unit, it.para, it.idx)}
         ${it.para.zh ? `<details class="zh-trans"><summary>中文參考翻譯</summary>${esc(it.para.zh)}</details>` : ''}</div>`,
       bind: it => {
         const u = L.unit;
@@ -802,6 +858,8 @@
       html: it => {
         if (it.shuffle && !it._shuffled) { const c = it.options[it.answer]; it.options = shuffle(it.options); it.answer = it.options.indexOf(c); it._shuffled = true; }
         return `<div class="q-type">${esc(it.label || '選擇題')}</div>
+        ${it.listenLines ? `<div class="prompt-box" style="justify-content:center"><button class="icon-btn big" id="listen-play">🔊</button><button class="icon-btn slow" id="listen-slow">🐢</button></div>` : ''}
+        ${it.passage ? `<div class="card en passage">${esc(it.passage).replace(/_{2,}\s*\((\d+)\)\s*_{2,}|\(\d+\)_{2,}|_{2,}\((\d+)\)_{2,}/g, (m) => `<span class="blank">${m.replace(/_/g, '')}</span>`)}</div>` : ''}
         ${it.hideText ? `<div class="prompt-box" style="justify-content:center"><button class="icon-btn big" data-a="${esc(it.audio)}">🔊</button><button class="icon-btn slow" data-a-slow="${esc(it.audio)}">🐢</button></div>`
           : `<div class="prompt-box">${it.audio ? `<button class="icon-btn" data-a="${esc(it.audio)}">▶</button>` : ''}<div class="bubble ${/[一-鿿]/.test(it.prompt) ? '' : 'en'}">${esc(it.prompt)}</div></div>`}
         ${it.showArticle ? `<p><button class="btn small ghost" id="show-art">📰 看課文</button></p>` : ''}
@@ -810,6 +868,10 @@
       bind: it => {
         bindAudio(); let sel = -1; const ctl = {};
         const sa = $('#show-art'); if (sa) sa.onclick = articleModal;
+        if (it.listenLines) {
+          $('#listen-play').onclick = () => TTS.speakLines(it.listenLines);
+          $('#listen-slow').onclick = () => TTS.speakLines(it.listenLines, { slow: true });
+        }
         $$('.opt').forEach(b => b.onclick = () => {
           sel = +b.dataset.o; $$('.opt').forEach(x => x.classList.remove('sel')); b.classList.add('sel');
           if (it.optAudio) TTS.speak(it.options[sel]);
@@ -818,9 +880,10 @@
         ctl.check = () => {
           const ok = sel === it.answer;
           $$('.opt')[it.answer].classList.add('right'); if (!ok) $$('.opt')[sel].classList.add('wrong');
-          return { ok, correct: it.options[it.answer], extra: ok && it.explain ? `<div class="muted">${esc(it.explain)}</div>` : '' };
+          const script = it.listenLines ? `<details><summary>聽力原文</summary><div class="en small">${it.listenLines.map(l => (l.sp ? '<b>' + esc(l.sp) + ':</b> ' : '') + esc(l.en)).join('<br>')}</div></details>` : '';
+          return { ok, correct: it.options[it.answer], extra: (ok && it.explain ? `<div class="muted">${esc(it.explain)}</div>` : '') + script };
         };
-        ctl.init = () => { if (it.audio) setTimeout(() => TTS.speak(it.audio), 250); };
+        ctl.init = () => { if (it.audio) setTimeout(() => TTS.speak(it.audio), 250); if (it.listenLines) setTimeout(() => TTS.speakLines(it.listenLines), 300); };
         return ctl;
       }
     },
@@ -830,7 +893,8 @@
         return `<div class="q-type">${esc(it.label || '填空')}</div>
         <div class="prompt-box">${it.audio ? audioButtons(it.audio) : ''}${prompt ? `<div class="bubble ${/[一-鿿]/.test(it.prompt) && !/[a-z]{3}/i.test(it.prompt) ? '' : 'en'}">${prompt}${it.zh ? `<div class="small muted">${esc(it.zh)}</div>` : ''}</div>` : ''}</div>
         ${it.hint ? `<p class="muted small">提示：${esc(it.hint)}</p>` : ''}
-        ${it.dictation ? `<textarea class="input en" id="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type what you hear"></textarea>` : `<input class="input en" id="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type in English">`}`;
+        ${it.passage ? `<div class="card en passage">${esc(it.passage)}</div>` : ''}
+        ${it.dictation || it.translate ? `<textarea class="input en" id="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type what you hear"></textarea>` : `<input class="input en" id="ans" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type in English">`}`;
       },
       bind: it => {
         bindAudio(); const ctl = {}; const inp = $('#ans');
@@ -839,6 +903,11 @@
         ctl.check = () => {
           let ok = answerMatches(inp.value, it.answers);
           let extra = '';
+          if (it.translate) {
+            const best = it.answers.map(a => diffHtml(a, inp.value)).sort((a, b) => b.score - a.score)[0];
+            ok = ok || best.score >= 0.6;
+            return { ok, title: ok ? `翻得不錯！和參考答案相似度 ${Math.round(best.score * 100)}%` : `再比對一下參考答案（相似度 ${Math.round(best.score * 100)}%）`, correct: '參考答案：', extra: `<div class="en"><b>${esc(it.answers[0])}</b></div>${it.answers.length > 1 ? `<div class="small muted en">也可以：${it.answers.slice(1).map(esc).join(' / ')}</div>` : ''}${it.explain ? `<div class="small muted">${esc(it.explain)}</div>` : ''}` };
+          }
           if (!ok && it.dictation) {
             const d = diffHtml(it.answers[0], inp.value);
             if (d.score >= 0.9) { ok = true; }
@@ -984,6 +1053,7 @@
     }
   };
   function playParaObj(it, slow) {
+    if (it.para.lines && !AUDIO[normText(it.para.en)]) { TTS.speakLines(it.para.lines, { slow }); return; }
     const el = $('#para-' + it.idx); const spans = el ? $$('.w', el) : [];
     TTS.speak(it.para.en, {
       slow,
@@ -994,9 +1064,13 @@
 
   /* ---------------- 啟動 ---------------- */
   async function boot() {
-    try { await loadScript('units/manifest.js'); } catch (e) { try { await loadScript('units/manifest.example.js'); } catch (e2) { /* 無單元 */ } }
-    for (const f of (window.UNIT_FILES || [])) { try { await loadScript('units/' + f); } catch (e) { failedFiles.push(f); } }
+    (window.__PENDING_UNITS || []).forEach(u => window.registerUnit(u));
+    if (!window.__SINGLE_FILE) {
+      try { await loadScript('units/manifest.js'); } catch (e) { try { await loadScript('units/manifest.example.js'); } catch (e2) { /* 無單元 */ } }
+      for (const f of (window.UNIT_FILES || [])) { try { await loadScript('units/' + f); } catch (e) { failedFiles.push(f); } }
+    }
     UNITS.sort((a, b) => (a.order || 0) - (b.order || 0));
+    UNITS.forEach(u => (u.article || []).forEach(p => { if (p.lines && !p.en) p.en = p.lines.map(l => l.en).join(' '); }));
     UNITS.forEach(registerAudio);
     render();
   }
